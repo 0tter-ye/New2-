@@ -61,7 +61,7 @@ max_volume = symbol_info.volume_max
 volume_step = symbol_info.volume_step
 
 class Wallet:
-    def __init__(self, max_risk_per_trade=0.005, max_drawdown=0.2):  # Reduced max_risk_per_trade to 0.5%, increased max_drawdown to 20%
+    def __init__(self, max_risk_per_trade=0.005, max_drawdown=0.2):
         account_info = mt5.account_info()
         self.balance = account_info.balance if account_info else 0
         self.initial_balance = self.balance
@@ -70,7 +70,7 @@ class Wallet:
         self.max_risk_per_trade = max_risk_per_trade
         self.max_drawdown = max_drawdown
         self.paused = False
-        self.max_profit = {}
+        self.max_profit = {}  # Still tracking max_profit for potential future use, but not for trailing stop
 
     def sync_balance(self):
         account_info = mt5.account_info()
@@ -80,9 +80,8 @@ class Wallet:
             if drawdown >= self.max_drawdown:
                 self.paused = True
                 logging.warning(f"Max drawdown ({self.max_drawdown*100}%) reached. Trading paused.")
-            # Added portfolio-level pause check
             total_unrealized_pnl = sum(self.calculate_unrealized_pnl(sym, mt5.symbol_info_tick(sym).last) for sym in self.positions)
-            if total_unrealized_pnl < -0.05 * self.initial_balance:  # Pause if unrealized losses exceed 5%
+            if total_unrealized_pnl < -0.05 * self.initial_balance:
                 self.paused = True
                 logging.warning("Total unrealized PNL <-5% of initial balance. Trading paused.")
         else:
@@ -162,7 +161,7 @@ class Wallet:
             'win_rate': win_rate
         }
 
-wallet = Wallet(max_risk_per_trade=0.005)  # Adjusted risk per trade
+wallet = Wallet(max_risk_per_trade=0.005)
 
 class MarkovChain:
     def __init__(self, states, transition_matrix):
@@ -303,7 +302,6 @@ def fetch_combined_data(symbol, timeframes=["1", "3", "5"], limit=200):
     combined_df["sma_short_5m"] = calculate_sma(combined_df, 10, "5m")
     combined_df["sma_long_5m"] = calculate_sma(combined_df, 30, "5m")
     combined_df["rsi_5m"] = calculate_rsi(combined_df, 14, "5m")
-    # Added MACD as a new feature
     combined_df["macd_5m"] = combined_df["close_5m"].ewm(span=12).mean() - combined_df["close_5m"].ewm(span=26).mean()
     combined_df = combined_df.dropna()
     logging.info(f"Combined data shape: {combined_df.shape}, Timeframes: {timeframes}")
@@ -386,7 +384,7 @@ if rf_model is None or dt_model is None or scaler is None:
     logging.error("Model training failed. Exiting.")
     exit()
 
-last_entry_time = None  # Added to limit overtrading
+last_entry_time = None
 
 def execute_trade(prediction, symbol, df, confidence_threshold=0.60, markov_win_prob=0.0):
     global last_entry_time
@@ -413,16 +411,13 @@ def execute_trade(prediction, symbol, df, confidence_threshold=0.60, markov_win_
         imbalance = calculate_bid_ask_imbalance(bid_volumes, ask_volumes)
         bullish_reversal, bearish_reversal = is_trend_reversal(df)
         
-        # Adjusted confidence threshold for shorts
         adjusted_threshold = 0.65 if side == "Sell" else max(0.50, 0.60 + confidence_adjustment)
         
-        # Added entry filters: order book imbalance and trend confirmation
         if (side == "Sell" and (imbalance >= -0.3 or not bearish_reversal)) or \
            (side == "Buy" and (imbalance <= 0.3 or not bullish_reversal)):
             logging.debug(f"Entry skipped: {side} - Imbalance {imbalance:.2f}, Reversal {bullish_reversal}/{bearish_reversal}")
             return
         
-        # Limit overtrading: one trade per 5 minutes unless volume spike
         now = datetime.now()
         if last_entry_time and (now - last_entry_time).total_seconds() < 300 and not volume_spike_1m:
             logging.debug(f"Skipping trade: Too soon since last entry ({(now - last_entry_time).total_seconds()}s)")
@@ -441,7 +436,6 @@ def execute_trade(prediction, symbol, df, confidence_threshold=0.60, markov_win_
         
         volume_range = [0.01, 0.02, 0.03, 0.04, 0.05]
         trade_qty = volume_range[min(int(total_score * (len(volume_range) - 1)), len(volume_range) - 1)]
-        # Increased size for longs in oversold conditions
         volume_multiplier = 1.2 if side == "Buy" and df["rsi_5m"].iloc[-1] < 30 else 1.0
         adjusted_qty = wallet.calculate_position_size(current_price, atr_5m * 8, fixed_qty=trade_qty, volume_multiplier=volume_multiplier)
 
@@ -476,7 +470,7 @@ def execute_trade(prediction, symbol, df, confidence_threshold=0.60, markov_win_
 
         logging.info(f"Placed {side} order: {adjusted_qty} {symbol} @ {current_price}, Imbalance: {imbalance:.2f}, Volume Spike: {volume_spike_1m}")
         wallet.open_position(symbol, side, adjusted_qty, current_price, df)
-        last_entry_time = now  # Update last entry time
+        last_entry_time = now
 
     except Exception as e:
         logging.error(f"Error executing trade: {e}")
@@ -486,7 +480,7 @@ def main_loop():
     iteration = 0
     start_time = datetime.now()
     last_retrain = datetime.now()
-    retrain_interval = timedelta(minutes=30)  # Reduced to 30 minutes for more frequent retraining
+    retrain_interval = timedelta(minutes=30)
     confidence_adjustment = 0.0
 
     while True:
@@ -548,7 +542,6 @@ def main_loop():
             support_levels, resistance_levels = calculate_support_resistance(df, window=20, timeframe="5m")
             logging.debug(f"Iteration {iteration} - Support Levels: {support_levels}, Resistance Levels: {resistance_levels}")
 
-            # Added volatility-based exit check
             atr_mean = df["atr_5m"].rolling(window=20).mean().iloc[-1]
             high_volatility = atr_5m > 2 * atr_mean
 
@@ -561,8 +554,7 @@ def main_loop():
                 profit_percent = (unrealized_pnl / (pos["qty"] * entry_price)) * 100
                 loss_percent = -profit_percent if profit_percent < 0 else 0
 
-                wallet.max_profit[sym] = max(wallet.max_profit[sym], profit_percent)
-                trailing_stop = wallet.max_profit[sym] - (0.5 if side == "Sell" else 1.0)  # Tighter trailing stop for shorts
+                wallet.max_profit[sym] = max(wallet.max_profit[sym], profit_percent)  # Still tracked but not used for trailing stop
 
                 near_resistance = any(abs(current_price - r) / current_price < 0.005 for r in resistance_levels)
                 near_support = any(abs(current_price - s) / current_price < 0.005 for s in support_levels)
@@ -585,9 +577,6 @@ def main_loop():
                 elif side == "Sell" and rsi_5m < 30 and profit_percent > 0:
                     logging.info(f"Iteration {iteration} - Oversold (RSI: {rsi_5m:.2f}), closing Sell with profit: {profit_percent:.2f}%")
                     wallet.close_position(sym, current_price)
-                elif profit_percent > 2.0 and profit_percent < trailing_stop:
-                    logging.info(f"Iteration {iteration} - Trailing stop triggered: {profit_percent:.2f}% (Max: {wallet.max_profit[sym]:.2f}%)")
-                    wallet.close_position(sym, current_price)
                 elif side == "Buy" and bearish_reversal and profit_percent > 0:
                     logging.info(f"Iteration {iteration} - Bearish reversal detected, closing Buy with profit: {profit_percent:.2f}%")
                     wallet.close_position(sym, current_price)
@@ -600,11 +589,9 @@ def main_loop():
                 elif side == "Sell" and imbalance > 0.5 and df["volume_spike_1m"].iloc[-1]:
                     logging.info(f"Iteration {iteration} - Big buy detected, closing Sell: Imbalance {imbalance:.2f}")
                     wallet.close_position(sym, current_price)
-                # Adjusted time-based exit: 5 minutes for shorts, 10 for longs
                 elif time_open >= (5 if side == "Sell" else 10):
                     logging.info(f"Iteration {iteration} - Time limit hit: {time_open:.1f} minutes, Profit: {profit_percent:.2f}%")
                     wallet.close_position(sym, current_price)
-                # Added volatility-based exit for shorts
                 elif side == "Sell" and high_volatility and profit_percent > 0:
                     logging.info(f"Iteration {iteration} - High volatility (ATR: {atr_5m:.2f}), closing Sell with profit: {profit_percent:.2f}%")
                     wallet.close_position(sym, current_price)
